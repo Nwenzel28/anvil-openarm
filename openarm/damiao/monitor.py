@@ -6,6 +6,7 @@ This script disables all Damiao motors and displays their current angles.
 import argparse
 import asyncio
 import logging
+import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -508,20 +509,33 @@ async def teleop(  # noqa: C901, PLR0912
     sys.stdout.write(header + "\n")
     sys.stdout.write("  " + "-" * (len(header) - 2) + "\n")
 
-    # Print the initial joint values once. Reprinting the table requires cursor
-    # positioning that becomes unreliable when the table wraps in a terminal.
-    for motor_idx, config in enumerate(MOTOR_CONFIGS):
-        line = f"  {config.name:<12}"
-        for arm in arms:
-            state = arm.states[motor_idx] if motor_idx < len(arm.states) else None
-            if state:
-                angle_deg = state.position * 180 / pi
-                line += f"  {angle_deg:+8.2f}°     "
-            elif motor_idx >= len(arm.motors) or arm.motors[motor_idx] is None:
-                line += "       N/A        "
-            else:
-                line += "    No state      "
-        sys.stdout.write(line + "\n")
+    # ANSI cursor save/restore lets us redraw from the same physical position,
+    # even when a wide row wraps onto multiple terminal lines.
+    dynamic_display = sys.stdout.isatty() and os.environ.get("TERM") not in {
+        None,
+        "",
+        "dumb",
+        "unknown",
+    }
+
+    def render_joint_table() -> None:
+        for motor_idx, config in enumerate(MOTOR_CONFIGS):
+            line = f"\r  {config.name:<12}"
+            for arm in arms:
+                state = arm.states[motor_idx] if motor_idx < len(arm.states) else None
+                if state:
+                    angle_deg = state.position * 180 / pi
+                    line += f"  {angle_deg:+8.2f}°     "
+                elif motor_idx >= len(arm.motors) or arm.motors[motor_idx] is None:
+                    line += "       N/A        "
+                else:
+                    line += "    No state      "
+            sys.stdout.write(line + "\033[K\n")
+        sys.stdout.flush()
+
+    if dynamic_display:
+        sys.stdout.write("\033[s")
+    render_joint_table()
 
     # Print stop instruction before entering raw mode
     stop_msg = "Press 'Q' to stop" if HAS_TERMIOS else "Press Ctrl+C to stop"
@@ -558,6 +572,11 @@ async def teleop(  # noqa: C901, PLR0912
                 if key == "q":
                     raw_print("\nStopping teleoperation...")
                     break
+
+            if dynamic_display:
+                # Restore the position at the first joint row and overwrite it.
+                sys.stdout.write("\033[u")
+                render_joint_table()
 
             # Small delay before refresh
             await asyncio.sleep(0.01)
