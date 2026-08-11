@@ -94,8 +94,9 @@ class Arm:
                 except Exception as e:  # noqa: BLE001
                     logger.debug("Failed to disable motor: %s", e)
 
-    async def enable_all_motors(self, control_mode: ControlMode) -> None:
+    async def enable_all_motors(self, control_mode: ControlMode) -> bool:
         """Enable all active motors with specified control mode."""
+        all_enabled = True
         for idx, motor in enumerate(self.motors):
             if motor is not None:
                 try:
@@ -104,8 +105,10 @@ class Arm:
                     logger.info("Motor %d: Enabled", idx + 1)
                     sys.stdout.write(f"    Motor {idx + 1}: Enabled\n")
                 except Exception as e:
+                    all_enabled = False
                     logger.exception("Motor %d: Error", idx + 1)
                     sys.stderr.write(f"{RED}    Motor {idx + 1}: Error - {e}{RESET}\n")
+        return all_enabled and self.active_count > 0
 
     async def refresh_states(self) -> None:
         """Refresh states for all motors."""
@@ -485,18 +488,40 @@ async def teleop(  # noqa: C901, PLR0912
 
     # Enable all motors (masters with MIT, slaves with PosVel)
     sys.stdout.write("\nEnabling motors for teleoperation...\n")
+    collapse_enable_status = sys.stdout.isatty() and os.environ.get("TERM") not in {
+        None,
+        "",
+        "dumb",
+        "unknown",
+    }
+
+    def collapse_arm_enable_status(arm: Arm) -> None:
+        if not collapse_enable_status:
+            return
+
+        lines_to_clear = arm.active_count + 1
+        sys.stdout.write(f"\033[{lines_to_clear}A")
+        for _ in range(lines_to_clear):
+            sys.stdout.write("\r\033[2K\n")
+        sys.stdout.write(f"\033[{lines_to_clear}A")
+        sys.stdout.write(f"  {arm.channel}: All motors enabled\n")
+        sys.stdout.flush()
+
     for arm in arms:
         if arm.is_slave:
             sys.stdout.write(
                 f"  {arm.channel}: Enabling motors with "
                 f"Position-Velocity control (slave)\n"
             )
-            await arm.enable_all_motors(ControlMode.POS_VEL)
+            all_enabled = await arm.enable_all_motors(ControlMode.POS_VEL)
         else:  # master
             sys.stdout.write(
                 f"  {arm.channel}: Enabling motors with MIT control (master)\n"
             )
-            await arm.enable_all_motors(ControlMode.MIT)
+            all_enabled = await arm.enable_all_motors(ControlMode.MIT)
+
+        if all_enabled:
+            collapse_arm_enable_status(arm)
 
     # Start teleoperation with monitoring display
     sys.stdout.write("\nTeleoperation mode starting...\n\n")
