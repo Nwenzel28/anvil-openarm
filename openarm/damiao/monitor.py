@@ -153,6 +153,24 @@ async def _main(args: argparse.Namespace, can_buses: list[can.BusABC]) -> None: 
     # Detect motors on each bus
     all_bus_motors = []
     has_missing_motor = False
+    collapse_scan_status = sys.stdout.isatty() and os.environ.get("TERM") not in {
+        None,
+        "",
+        "dumb",
+        "unknown",
+    }
+
+    def collapse_bus_scan_status(bus_idx: int) -> None:
+        if not collapse_scan_status:
+            return
+
+        lines_to_clear = len(MOTOR_CONFIGS) + 1
+        sys.stdout.write(f"\033[{lines_to_clear}A")
+        for _ in range(lines_to_clear):
+            sys.stdout.write("\r\033[2K\n")
+        sys.stdout.write(f"\033[{lines_to_clear}A")
+        sys.stdout.write(f"Bus {bus_idx + 1} Motor Status: All Motors Enabled\n")
+        sys.stdout.flush()
 
     for bus_idx, can_bus in enumerate(can_buses):
         sys.stdout.write(f"\nScanning for motors on bus {bus_idx + 1}...\n")
@@ -168,6 +186,7 @@ async def _main(args: argparse.Namespace, can_buses: list[can.BusABC]) -> None: 
 
         # Check all expected motors and their status
         bus_motors = []
+        all_bus_motors_enabled = True
         for config in MOTOR_CONFIGS:
             if config.slave_id not in detected_lookup:
                 # Motor is not detected
@@ -177,6 +196,7 @@ async def _main(args: argparse.Namespace, can_buses: list[can.BusABC]) -> None: 
                 )
                 bus_motors.append(None)
                 has_missing_motor = True
+                all_bus_motors_enabled = False
             elif detected_lookup[config.slave_id].master_id != config.master_id:
                 # Motor is detected but master ID doesn't match
                 detected_info = detected_lookup[config.slave_id]
@@ -187,6 +207,7 @@ async def _main(args: argparse.Namespace, can_buses: list[can.BusABC]) -> None: 
                 )
                 bus_motors.append(None)
                 has_missing_motor = True
+                all_bus_motors_enabled = False
             else:
                 # Motor is connected and configured correctly
                 sys.stdout.write(
@@ -202,6 +223,9 @@ async def _main(args: argparse.Namespace, can_buses: list[can.BusABC]) -> None: 
                     motor_type=config.type,
                 )
                 bus_motors.append(motor)
+
+        if all_bus_motors_enabled:
+            collapse_bus_scan_status(bus_idx)
 
         all_bus_motors.append(bus_motors)
 
