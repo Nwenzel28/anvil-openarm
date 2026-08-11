@@ -54,6 +54,9 @@ FOLLOW_SPEC_PARTS = 4  # MASTER:POSITION:SLAVE:POSITION
 GRIPPER_MOTOR_INDEX = 7
 GRIPPER_FEEDBACK_GAIN = 0.35
 GRIPPER_FEEDBACK_MAX_TORQUE = 1.0
+GRIPPER_FEEDBACK_DEADBAND = 0.08
+GRIPPER_FEEDBACK_SMOOTHING = 0.18
+GRIPPER_FEEDBACK_MAX_STEP = 0.06
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -81,6 +84,7 @@ class Arm:
     is_slave: bool = False  # Whether this arm is a slave
     mirror_mode: bool = False  # Whether mirror mode is enabled (for slaves)
     follows: str | None = None  # Channel name of master (for slaves)
+    gripper_feedback_torque: float = 0.0
 
     @property
     def active_motors(self) -> list[Motor]:
@@ -140,7 +144,7 @@ def calculate_gripper_feedback_torque(master_arm: Arm, arms: list[Arm]) -> float
     Mirror mappings reverse that direction before applying the feedback to the
     leader.  Invalid or missing telemetry contributes no feedback.
     """
-    feedback_torque = 0.0
+    raw_feedback_torque = 0.0
     for slave_arm in arms:
         if not slave_arm.is_slave or slave_arm.follows != master_arm.channel:
             continue
@@ -154,13 +158,24 @@ def calculate_gripper_feedback_torque(master_arm: Arm, arms: list[Arm]) -> float
         # the object's perspective, so invert it before applying it to the
         # leader.  Mirrored mappings still need their positional sign flip.
         direction = 1.0 if slave_arm.mirror_mode else -1.0
-        feedback_torque += direction * state.torque
+        raw_feedback_torque += direction * state.torque
 
-    feedback_torque *= GRIPPER_FEEDBACK_GAIN
-    return max(
+    target_torque = raw_feedback_torque * GRIPPER_FEEDBACK_GAIN
+    target_torque = max(
         -GRIPPER_FEEDBACK_MAX_TORQUE,
-        min(feedback_torque, GRIPPER_FEEDBACK_MAX_TORQUE),
+        min(target_torque, GRIPPER_FEEDBACK_MAX_TORQUE),
     )
+    if abs(target_torque) < GRIPPER_FEEDBACK_DEADBAND:
+        target_torque = 0.0
+
+    smoothed_torque = master_arm.gripper_feedback_torque + (
+        target_torque - master_arm.gripper_feedback_torque
+    ) * GRIPPER_FEEDBACK_SMOOTHING
+    step = smoothed_torque - master_arm.gripper_feedback_torque
+    step = max(-GRIPPER_FEEDBACK_MAX_STEP, min(step, GRIPPER_FEEDBACK_MAX_STEP))
+    master_arm.gripper_feedback_torque += step
+
+    return master_arm.gripper_feedback_torque
 
 
 async def main(args: argparse.Namespace) -> None:
