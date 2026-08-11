@@ -11,7 +11,7 @@ import re
 import shutil
 import sys
 from dataclasses import dataclass, field
-from math import pi
+from math import isfinite, pi
 
 # Platform-specific imports for keyboard input
 try:
@@ -47,6 +47,13 @@ RESET = "\033[0m"
 
 # Constants
 FOLLOW_SPEC_PARTS = 4  # MASTER:POSITION:SLAVE:POSITION
+
+# Gripper-only haptic feedback.  Keep this deliberately small: the leader
+# remains passive for J1-J7, and only a capped fraction of the follower J8
+# torque is sent back to the leader J8.
+GRIPPER_MOTOR_INDEX = 7
+GRIPPER_FEEDBACK_GAIN = 0.35
+GRIPPER_FEEDBACK_MAX_TORQUE = 1.0
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -124,6 +131,33 @@ class Arm:
             else:
                 new_states.append(None)
         self.states = new_states
+
+
+def calculate_gripper_feedback_torque(master_arm: Arm, arms: list[Arm]) -> float:
+    """Return the safe J8 torque to reflect from followers to a master.
+
+    Follower torque is already expressed in the follower motor's direction.
+    Mirror mappings reverse that direction before applying the feedback to the
+    leader.  Invalid or missing telemetry contributes no feedback.
+    """
+    feedback_torque = 0.0
+    for slave_arm in arms:
+        if not slave_arm.is_slave or slave_arm.follows != master_arm.channel:
+            continue
+        if GRIPPER_MOTOR_INDEX >= len(slave_arm.states):
+            continue
+        state = slave_arm.states[GRIPPER_MOTOR_INDEX]
+        if state is None or not isfinite(state.torque):
+            continue
+
+        direction = -1.0 if slave_arm.mirror_mode else 1.0
+        feedback_torque += direction * state.torque
+
+    feedback_torque *= GRIPPER_FEEDBACK_GAIN
+    return max(
+        -GRIPPER_FEEDBACK_MAX_TORQUE,
+        min(feedback_torque, GRIPPER_FEEDBACK_MAX_TORQUE),
+    )
 
 
 async def main(args: argparse.Namespace) -> None:
@@ -640,6 +674,9 @@ async def teleop(  # noqa: C901, PLR0912
             master_arms = {arm.channel: arm for arm in arms if arm.is_master}
             for master_arm in master_arms.values():
                 new_states = []
+                gripper_feedback_torque = calculate_gripper_feedback_torque(
+                    master_arm, arms
+                )
 
                 # Calculate gravity compensation if enabled
                 gravity_torques = None
@@ -671,6 +708,13 @@ async def teleop(  # noqa: C901, PLR0912
                                 active_idx = active_indices.index(motor_idx)
                                 if active_idx < len(gravity_torques):
                                     torque = gravity_torques[active_idx]
+
+                            # Reflect follower contact force only through the
+                            # leader gripper.  The other seven joints retain
+                            # their existing passive/gravity-compensated MIT
+                            # behavior.
+                            if motor_idx == GRIPPER_MOTOR_INDEX:
+                                torque = gripper_feedback_torque
 
                             # MIT control with zero torque or gravity compensation
                             params = MitControlParams(
