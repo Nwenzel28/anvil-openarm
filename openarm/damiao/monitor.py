@@ -150,7 +150,10 @@ def calculate_gripper_feedback_torque(master_arm: Arm, arms: list[Arm]) -> float
         if state is None or not isfinite(state.torque):
             continue
 
-        direction = -1.0 if slave_arm.mirror_mode else 1.0
+        # The motor's reported reaction torque opposes the contact force from
+        # the object's perspective, so invert it before applying it to the
+        # leader.  Mirrored mappings still need their positional sign flip.
+        direction = 1.0 if slave_arm.mirror_mode else -1.0
         feedback_torque += direction * state.torque
 
     feedback_torque *= GRIPPER_FEEDBACK_GAIN
