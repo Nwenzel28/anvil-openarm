@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 import re
+import shutil
 import sys
 from dataclasses import dataclass, field
 from math import pi
@@ -501,26 +502,38 @@ async def teleop(  # noqa: C901, PLR0912
     sys.stdout.write("\nTeleoperation mode starting...\n\n")
 
     # Print header with bus labels showing channel names and roles
-    header = "  Motor"
-    for arm in arms:
-        # Slave: show S* for mirror mode, S for normal; Master: M
-        role = ("S*" if arm.mirror_mode else "S") if arm.is_slave else "M"
-        header += f"   {arm.channel}({role})   "
-    sys.stdout.write(header + "\n")
-    sys.stdout.write("  " + "-" * (len(header) - 2) + "\n")
-
-    # ANSI cursor save/restore lets us redraw from the same physical position,
-    # even when a wide row wraps onto multiple terminal lines.
     dynamic_display = sys.stdout.isatty() and os.environ.get("TERM") not in {
         None,
         "",
         "dumb",
         "unknown",
     }
+    terminal_width = shutil.get_terminal_size((120, 20)).columns
 
-    def render_joint_table() -> None:
+    def fit_to_terminal(line: str) -> str:
+        # Keep each logical row to one terminal line so redraws cannot drift.
+        max_width = max(1, terminal_width - 1)
+        return line[:max_width]
+
+    header = "  Motor"
+    for arm in arms:
+        # Slave: show S* for mirror mode, S for normal; Master: M
+        role = ("S*" if arm.mirror_mode else "S") if arm.is_slave else "M"
+        header += f"   {arm.channel}({role})   "
+    header = fit_to_terminal(header)
+    sys.stdout.write(header + "\n")
+    sys.stdout.write("  " + "-" * max(0, len(header) - 2) + "\n")
+
+    # Print stop instruction before entering raw mode
+    stop_msg = "Press 'Q' to stop" if HAS_TERMIOS else "Press Ctrl+C to stop"
+    display_height = len(MOTOR_CONFIGS) + 1
+
+    def render_joint_table(*, redraw: bool = False) -> None:
+        if redraw:
+            sys.stdout.write(f"\033[{display_height}A")
+        line_prefix = "\r\033[2K" if dynamic_display else ""
         for motor_idx, config in enumerate(MOTOR_CONFIGS):
-            line = f"\r  {config.name:<12}"
+            line = f"  {config.name:<12}"
             for arm in arms:
                 state = arm.states[motor_idx] if motor_idx < len(arm.states) else None
                 if state:
@@ -530,16 +543,11 @@ async def teleop(  # noqa: C901, PLR0912
                     line += "       N/A        "
                 else:
                     line += "    No state      "
-            sys.stdout.write(line + "\033[K\n")
+            sys.stdout.write(line_prefix + fit_to_terminal(line) + "\n")
+        sys.stdout.write(line_prefix + fit_to_terminal(stop_msg) + "\n")
         sys.stdout.flush()
 
-    if dynamic_display:
-        sys.stdout.write("\033[s")
     render_joint_table()
-
-    # Print stop instruction before entering raw mode
-    stop_msg = "Press 'Q' to stop" if HAS_TERMIOS else "Press Ctrl+C to stop"
-    sys.stdout.write(stop_msg + "\n")
 
     # Set terminal to raw mode for keyboard detection
     old_settings = None
@@ -574,9 +582,7 @@ async def teleop(  # noqa: C901, PLR0912
                     break
 
             if dynamic_display:
-                # Restore the position at the first joint row and overwrite it.
-                sys.stdout.write("\033[u")
-                render_joint_table()
+                render_joint_table(redraw=True)
 
             # Small delay before refresh
             await asyncio.sleep(0.01)
