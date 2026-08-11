@@ -55,8 +55,12 @@ GRIPPER_MOTOR_INDEX = 7
 GRIPPER_FEEDBACK_GAIN = 0.35
 GRIPPER_FEEDBACK_MAX_TORQUE = 1.0
 GRIPPER_FEEDBACK_DEADBAND = 0.08
-GRIPPER_FEEDBACK_SMOOTHING = 0.18
-GRIPPER_FEEDBACK_MAX_STEP = 0.06
+GRIPPER_FEEDBACK_MIN_SMOOTHING = 0.08
+GRIPPER_FEEDBACK_MAX_SMOOTHING = 0.35
+GRIPPER_FEEDBACK_MIN_STEP = 0.025
+GRIPPER_FEEDBACK_MAX_STEP = 0.12
+GRIPPER_FEEDBACK_SLOW_SPEED = 0.05
+GRIPPER_FEEDBACK_FAST_SPEED = 1.0
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -168,14 +172,39 @@ def calculate_gripper_feedback_torque(master_arm: Arm, arms: list[Arm]) -> float
     if abs(target_torque) < GRIPPER_FEEDBACK_DEADBAND:
         target_torque = 0.0
 
+    smoothing, max_step = get_gripper_feedback_response(master_arm)
     smoothed_torque = master_arm.gripper_feedback_torque + (
         target_torque - master_arm.gripper_feedback_torque
-    ) * GRIPPER_FEEDBACK_SMOOTHING
+    ) * smoothing
     step = smoothed_torque - master_arm.gripper_feedback_torque
-    step = max(-GRIPPER_FEEDBACK_MAX_STEP, min(step, GRIPPER_FEEDBACK_MAX_STEP))
+    step = max(-max_step, min(step, max_step))
     master_arm.gripper_feedback_torque += step
 
     return master_arm.gripper_feedback_torque
+
+
+def get_gripper_feedback_response(master_arm: Arm) -> tuple[float, float]:
+    """Scale feedback responsiveness with leader gripper speed."""
+    speed = 0.0
+    if GRIPPER_MOTOR_INDEX < len(master_arm.states):
+        state = master_arm.states[GRIPPER_MOTOR_INDEX]
+        if state is not None and isfinite(state.velocity):
+            speed = abs(state.velocity)
+
+    speed_range = GRIPPER_FEEDBACK_FAST_SPEED - GRIPPER_FEEDBACK_SLOW_SPEED
+    if speed_range <= 0:
+        speed_ratio = 1.0
+    else:
+        speed_ratio = (speed - GRIPPER_FEEDBACK_SLOW_SPEED) / speed_range
+        speed_ratio = max(0.0, min(speed_ratio, 1.0))
+
+    smoothing = GRIPPER_FEEDBACK_MIN_SMOOTHING + speed_ratio * (
+        GRIPPER_FEEDBACK_MAX_SMOOTHING - GRIPPER_FEEDBACK_MIN_SMOOTHING
+    )
+    max_step = GRIPPER_FEEDBACK_MIN_STEP + speed_ratio * (
+        GRIPPER_FEEDBACK_MAX_STEP - GRIPPER_FEEDBACK_MIN_STEP
+    )
+    return smoothing, max_step
 
 
 async def main(args: argparse.Namespace) -> None:
