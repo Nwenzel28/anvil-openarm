@@ -6,7 +6,6 @@ This script disables all Damiao motors and displays their current angles.
 import argparse
 import asyncio
 import logging
-import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -509,29 +508,20 @@ async def teleop(  # noqa: C901, PLR0912
     sys.stdout.write(header + "\n")
     sys.stdout.write("  " + "-" * (len(header) - 2) + "\n")
 
-    # Print initial lines for each motor
-    for config in MOTOR_CONFIGS:
+    # Print the initial joint values once. Reprinting the table requires cursor
+    # positioning that becomes unreliable when the table wraps in a terminal.
+    for motor_idx, config in enumerate(MOTOR_CONFIGS):
         line = f"  {config.name:<12}"
-        for _ in arms:
-            line += "  Initializing...  "
+        for arm in arms:
+            state = arm.states[motor_idx] if motor_idx < len(arm.states) else None
+            if state:
+                angle_deg = state.position * 180 / pi
+                line += f"  {angle_deg:+8.2f}°     "
+            elif motor_idx >= len(arm.motors) or arm.motors[motor_idx] is None:
+                line += "       N/A        "
+            else:
+                line += "    No state      "
         sys.stdout.write(line + "\n")
-
-    # Number of motors (lines to move up)
-    num_motors = len(MOTOR_CONFIGS)
-
-    # Cursor movement only works in an ANSI-capable terminal. When output is
-    # captured (for example, by an IDE output pane), writing the refresh table
-    # on every control cycle appends a new J1–J8 block instead of replacing it.
-    dynamic_display = sys.stdout.isatty() and os.environ.get("TERM") not in {
-        None,
-        "",
-        "dumb",
-        "unknown",
-    }
-    if not dynamic_display:
-        sys.stdout.write(
-            "Live display disabled because stdout is not an interactive terminal.\n"
-        )
 
     # Print stop instruction before entering raw mode
     stop_msg = "Press 'Q' to stop" if HAS_TERMIOS else "Press Ctrl+C to stop"
@@ -568,31 +558,6 @@ async def teleop(  # noqa: C901, PLR0912
                 if key == "q":
                     raw_print("\nStopping teleoperation...")
                     break
-
-            if dynamic_display:
-                # Move cursor up to the first motor line (add +1 for the "Press Q" line)
-                sys.stdout.write(f"\033[{num_motors + 1}A")
-
-                # Print current states for all arms
-                for motor_idx, config in enumerate(MOTOR_CONFIGS):
-                    line = f"\r  {config.name:<12}"
-                    for arm in arms:
-                        if motor_idx < len(arm.states):
-                            state = arm.states[motor_idx]
-                            if state:
-                                # Show absolute angle
-                                angle_deg = state.position * 180 / pi
-                                line += f"  {angle_deg:+8.2f}°     "
-                            elif (
-                                motor_idx >= len(arm.motors)
-                                or arm.motors[motor_idx] is None
-                            ):
-                                line += "       N/A        "
-                            else:
-                                line += "    No state      "
-                        else:
-                            line += "       N/A        "
-                    sys.stdout.write(line + "\033[K\n")
 
             # Small delay before refresh
             await asyncio.sleep(0.01)
@@ -688,9 +653,6 @@ async def teleop(  # noqa: C901, PLR0912
                     slave_arm.states = new_states
 
     except KeyboardInterrupt:
-        # Move cursor below all motor lines
-        if dynamic_display:
-            sys.stdout.write(f"\033[{num_motors}B\n")
         if not raw_mode:
             sys.stdout.write("\nTeleoperation stopped.\n")
         else:
